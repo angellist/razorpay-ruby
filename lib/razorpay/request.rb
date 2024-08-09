@@ -1,5 +1,4 @@
 require 'httparty'
-require 'extensions/httparty/hash_conversions'
 require 'razorpay/constants'
 
 module Razorpay
@@ -25,14 +24,16 @@ module Razorpay
       if Razorpay.auth_type == Razorpay::OAUTH
         @options = {
           timeout: 30,
-          headers: headers
+          headers: headers,
+          query_string_normalizer: QueryStringNormalizer,
         }
-        headers['Authorization'] = 'Bearer ' + Razorpay.access_token 
-      else 
+        headers['Authorization'] = 'Bearer ' + Razorpay.access_token
+      else
         @options = {
           basic_auth: Razorpay.auth,
           timeout: 30,
-          headers: headers
+          headers: headers,
+          query_string_normalizer: QueryStringNormalizer,
         }
       end
     end
@@ -52,7 +53,7 @@ module Razorpay
     def get(url, data = {}, version="v1")
       request :get, "/#{version}/#{@entity_name}/#{url}", data
     end
-    
+
     def delete(url, version="v1")
       request :delete, "/#{version}/#{@entity_name}/#{url}"
     end
@@ -73,21 +74,21 @@ module Razorpay
       create_instance raw_request(method, url, data)
     end
 
-    def raw_request(method, url, data = {}) 
+    def raw_request(method, url, data = {})
       case method
       when :get
         @options[:query] = data
       when :post, :put, :patch
         @options[:body] = data
       end
-      
+
       self.class.send(method, url, @options)
     end
 
     def get_base_url(host)
       if host == Razorpay::AUTH_HOST
         return Razorpay::AUTH_URL
-      end 
+      end
       Razorpay::BASE_URI
     end
 
@@ -103,8 +104,8 @@ module Razorpay
 
       if response.is_a?(Array)==true || response.to_s.length == 0
         return response
-      end 
-      
+      end
+
       # if there was an error, throw it
       raise_error(response['error'], res.code) if response.nil? || response.key?('error') && res.code !=200
       # There must be a top level entity
@@ -131,6 +132,54 @@ module Razorpay
     rescue NameError, LoadError
       # We got an unknown error, cast it to Error for now
       raise Razorpay::Error.new, 'Unknown Error'
+    end
+  end
+
+  module QueryStringNormalizer
+    class << self
+      HTTParty::HashConversions.singleton_methods.each do |m|
+        define_method m, HTTParty::HashConversions.method(m).to_proc
+      end
+
+      def normalize_keys(key, value)
+        stack = []
+        normalized_keys = []
+
+        if value.respond_to?(:to_ary)
+          if value.empty?
+            normalized_keys << ["#{key}[]", '']
+          else
+            normalized_keys = value.to_ary.flat_map.with_index do
+              |element, index| normalize_keys("#{key}[#{index}]", element)
+            end
+          end
+        elsif value.respond_to?(:to_hash)
+          stack << [key, value.to_hash]
+        else
+          normalized_keys << [key.to_s, value]
+        end
+
+        stack.each do |parent, hash|
+          hash.each do |child_key, child_value|
+            if child_value.respond_to?(:to_hash)
+              stack << ["#{parent}[#{child_key}]", child_value.to_hash]
+            elsif child_value.respond_to?(:to_ary)
+              child_value.to_ary.each_with_index do |v, index|
+                normalized_keys << normalize_keys("#{parent}[#{child_key}][#{index}]", v).flatten
+              end
+            else
+              normalized_keys << normalize_keys("#{parent}[#{child_key}]", child_value).flatten
+            end
+          end
+        end
+
+        normalized_keys
+      end
+
+
+      def call(query)
+        to_params(query)
+      end
     end
   end
 end
